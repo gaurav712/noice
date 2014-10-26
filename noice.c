@@ -16,6 +16,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "queue.h"
 #include "util.h"
 
 #ifdef DEBUG
@@ -48,6 +49,14 @@ struct entry {
 	char *name;
 	mode_t mode;
 };
+
+struct work {
+	char *dir;
+	char *name;
+	TAILQ_ENTRY(work) next;
+};
+
+TAILQ_HEAD(workhead, work) workhead;
 
 /*
  * Layout:
@@ -267,6 +276,10 @@ enum {
 	SEL_FLTR,
 	SEL_SH,
 	SEL_CD,
+	SEL_WORK_ADD,
+	SEL_WORK_REMOVE,
+	SEL_WORK_CLEAN,
+	SEL_WORK_PROCESS,
 };
 
 int
@@ -321,8 +334,17 @@ nextsel(int *cur, int max)
 		break;
 	case '!':
 		return SEL_SH;
-	case 'c':
+	case 'z':
 		return SEL_CD;
+	/* Work management keybinds */
+	case 'a':
+		return SEL_WORK_ADD;
+	case 'r':
+		return SEL_WORK_REMOVE;
+	case 'c':
+		return SEL_WORK_CLEAN;
+	case 'p':
+		return SEL_WORK_PROCESS;
 	}
 
 	return 0;
@@ -394,11 +416,13 @@ canopendir(char *path)
 }
 
 void
-printent(struct entry *ent, int active)
+printent(struct entry *ent, int active, int added)
 {
 	char *name;
 	unsigned int maxlen = COLS - strlen(CURSR) - 1;
 	char cm = 0;
+	char buf[BUFSIZ];
+	int i, fillspaces;
 
 	/* Copy name locally */
 	name = xstrdup(ent->name);
@@ -424,11 +448,30 @@ printent(struct entry *ent, int active)
 	if (strlen(name) > maxlen)
 		name[maxlen] = '\0';
 
-	if (cm == 0)
-		printw("%s%s\n", active ? CURSR : EMPTY, name);
-	else
-		printw("%s%s%c\n", active ? CURSR : EMPTY, name, cm);
-
+	if (added != 0) {
+		attron(A_REVERSE);
+		if (cm == 0)
+			snprintf(buf, sizeof(buf), "%s%s",
+				 active ? CURSR : EMPTY, name);
+		else
+			snprintf(buf, sizeof(buf), "%s%s%c",
+				 active ? CURSR : EMPTY, name, cm);
+		fillspaces = 0;
+		for (i = 0; i < COLS; i++) {
+			if (buf[i] == '\0')
+				fillspaces = 1;
+			if (fillspaces == 1)
+				addch(' ');
+			else
+				addch(buf[i]);
+		}
+		attroff(A_REVERSE);
+	} else {
+		if (cm == 0)
+			printw("%s%s\n", active ? CURSR : EMPTY, name);
+		else
+			printw("%s%s%c\n", active ? CURSR : EMPTY, name, cm);
+	}
 	free(name);
 }
 
@@ -561,11 +604,13 @@ begin:
 	for (;;) {
 		int nlines;
 		int odd;
+		int added;
 		char *name;
 		char *bin;
 		char *dir;
 		char *tmp;
 		regex_t re;
+		struct work *w, *wtmp;
 
 redraw:
 		nlines = MIN(LINES - 4, n);
@@ -593,15 +638,45 @@ redraw:
 		/* Print listing */
 		odd = ISODD(nlines);
 		if (cur < nlines / 2) {
-			for (i = 0; i < nlines; i++)
-				printent(&dents[i], i == cur);
+			for (i = 0; i < nlines; i++) {
+				added = 0;
+				name = dents[i].name;
+				TAILQ_FOREACH(w, &workhead, next) {
+					if (strcmp(w->dir, path) == 0 &&
+					    strcmp(w->name, name) == 0) {
+						added = 1;
+						break;
+					}
+				}
+				printent(&dents[i], i == cur, added);
+			}
 		} else if (cur >= n - nlines / 2) {
-			for (i = n - nlines; i < n; i++)
-				printent(&dents[i], i == cur);
+			for (i = n - nlines; i < n; i++) {
+				added = 0;
+				name = dents[i].name;
+				TAILQ_FOREACH(w, &workhead, next) {
+					if (strcmp(w->dir, path) == 0 &&
+					    strcmp(w->name, name) == 0) {
+						added = 1;
+						break;
+					}
+				}
+				printent(&dents[i], i == cur, added);
+			}
 		} else {
 			for (i = cur - nlines / 2;
-			     i < cur + nlines / 2 + odd; i++)
-				printent(&dents[i], i == cur);
+			     i < cur + nlines / 2 + odd; i++) {
+				added = 0;
+				name = dents[i].name;
+				TAILQ_FOREACH(w, &workhead, next) {
+					if (strcmp(w->dir, path) == 0 &&
+					    strcmp(w->name, name) == 0) {
+						added = 1;
+						break;
+					}
+				}
+				printent(&dents[i], i == cur, added);
+			}
 		}
 
 nochange:
@@ -732,6 +807,70 @@ nochange:
 			DPRINTF_S(path);
 			cur = 0;
 			goto out;
+		case SEL_WORK_ADD:
+			name = dents[cur].name;
+			tmp = makepath(path, name);
+			DPRINTF_S(tmp);
+			r = stat(tmp, &sb);
+			free(tmp);
+			if (r == -1) {
+				printwarn();
+				goto nochange;
+			}
+			if (S_ISREG(sb.st_mode) == 1) {
+				TAILQ_FOREACH(w, &workhead, next) {
+					if (strcmp(w->dir, path) == 0 &&
+					    strcmp(w->name, name) == 0) {
+						if (cur < n - 1)
+							cur++;
+						goto redraw;
+					}
+				}
+				w = xmalloc(sizeof(*w));
+				w->dir = xstrdup(path);
+				w->name = xstrdup(name);
+				TAILQ_INSERT_TAIL(&workhead, w, next);
+			}
+			if (cur < n - 1)
+				cur++;
+			goto redraw;
+		case SEL_WORK_REMOVE:
+			name = dents[cur].name;
+			for (w = TAILQ_FIRST(&workhead); w; w = wtmp) {
+				wtmp = TAILQ_NEXT(w, next);
+				if (strcmp(w->dir, path) == 0 &&
+				    strcmp(w->name, name) == 0) {
+					TAILQ_REMOVE(&workhead, w, next);
+					free(w->dir);
+					free(w->name);
+					free(w);
+					break;
+				}
+			}
+			if (cur < n - 1)
+				cur++;
+			goto redraw;
+		case SEL_WORK_PROCESS:
+			TAILQ_FOREACH(w, &workhead, next) {
+				bin = openwith(w->name);
+				if (bin == NULL)
+					continue;
+				tmp = makepath(w->dir, w->name);
+				exitcurses();
+				spawn(bin, tmp, NULL);
+				initcurses();
+				free(tmp);
+			}
+			/* fall through */
+		case SEL_WORK_CLEAN:
+			while (!TAILQ_EMPTY(&workhead)) {
+				w = TAILQ_FIRST(&workhead);
+				TAILQ_REMOVE(&workhead, w, next);
+				free(w->dir);
+				free(w->name);
+				free(w);
+			}
+			goto redraw;
 		}
 	}
 
@@ -773,6 +912,8 @@ main(int argc, char *argv[])
 	setlocale(LC_ALL, "");
 
 	initcurses();
+
+	TAILQ_INIT(&workhead);
 
 	browse(ipath, ifilter);
 

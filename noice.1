@@ -40,8 +40,16 @@ Back up one directory level.
 Filter view (see below for more information).
 .It Ic !
 Spawn shell in current directory.
-.It Ic c
+.It Ic z
 Change into the given directory.
+.It Ic a
+Add entry to workqueue.
+.It Ic r
+Remove entry from workqueue.
+.It Ic c
+Clear workqueue.
+.It Ic p
+Process all entries in workqueue.
 .It Ic q
 Quit
 .Nm .
@@ -73,6 +81,14 @@ If
 .Nm
 is invoked as root the default filter will also match hidden
 files.
+.Sh WORKQUEUES
+.Nm
+allows you to add and remove entries to and from a workqueue.
+You can process the workqueue in one go.  After the workqueue
+has been processed, it is also cleared.
+.Pp
+If an entry has no association then it will be skipped.  You
+cannot add a single entry more than once to the workqueue.
 .Sh HISTORY
 .Nm
 remembers the old path.  Backing up one directory level will set the
